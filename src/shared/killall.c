@@ -187,18 +187,13 @@ static int wait_for_children(Set *pids, sigset_t *mask, usec_t timeout) {
         }
 }
 
-static int killall(int sig, Set *pids, bool send_sighup) {
-        _cleanup_closedir_ DIR *dir = NULL;
+static int killall(DIR *proc_dir, int sig, Set *pids, bool send_sighup) {
         int n_killed = 0;
 
         /* Send the specified signal to all remaining processes, if not excluded by ignore_proc().
          * Returns the number of processes to which the specified signal was sent */
 
-        dir = opendir("/proc");
-        if (!dir)
-                return log_warning_errno(errno, "opendir(/proc) failed: %m");
-
-        FOREACH_DIRENT_ALL(de, dir, break) {
+        FOREACH_DIRENT_ALL(de, proc_dir, break) {
                 pid_t pid;
                 int r;
 
@@ -252,6 +247,7 @@ int broadcast_signal(int sig, bool wait_for_exit, bool send_sighup, usec_t timeo
         int n_children_left;
         sigset_t mask, oldmask;
         _cleanup_set_free_ Set *pids = NULL;
+        _cleanup_closedir_ DIR *proc_dir = NULL;
 
         /* Send the specified signal to all remaining processes, if not excluded by ignore_proc().
          * Return:
@@ -266,10 +262,14 @@ int broadcast_signal(int sig, bool wait_for_exit, bool send_sighup, usec_t timeo
         assert_se(sigaddset(&mask, SIGCHLD) == 0);
         assert_se(sigprocmask(SIG_BLOCK, &mask, &oldmask) == 0);
 
+        proc_dir = opendir("/proc");
+        if (!proc_dir)
+                return log_warning_errno(errno, "opendir(/proc) failed: %m");
+
         if (kill(-1, SIGSTOP) < 0 && errno != ESRCH)
                 log_warning_errno(errno, "kill(-1, SIGSTOP) failed: %m");
 
-        n_children_left = killall(sig, pids, send_sighup);
+        n_children_left = killall(proc_sig, pids, send_sighup);
 
         if (kill(-1, SIGCONT) < 0 && errno != ESRCH)
                 log_warning_errno(errno, "kill(-1, SIGCONT) failed: %m");
