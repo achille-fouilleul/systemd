@@ -4,7 +4,10 @@
 ***/
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -22,9 +25,8 @@
 #include "terminal-util.h"
 #include "util.h"
 
-static bool ignore_proc(pid_t pid, bool warn_rootfs) {
+static bool ignore_proc(int proc_dir_fd, pid_t pid, bool warn_rootfs) {
         _cleanup_fclose_ FILE *f = NULL;
-        const char *p;
         char c = 0;
         uid_t uid;
         int r;
@@ -34,11 +36,11 @@ static bool ignore_proc(pid_t pid, bool warn_rootfs) {
                 return true;
 
         /* Ignore kernel threads */
-        r = is_kernel_thread(pid);
+        r = is_kernel_thread_at(proc_dir_fd, pid);
         if (r != 0)
                 return true; /* also ignore processes where we can't determine this */
 
-        r = get_process_uid(pid, &uid);
+        r = get_process_uid_at(proc_dir_fd, pid, &uid);
         if (r < 0)
                 return true; /* not really, but better safe than sorry */
 
@@ -46,9 +48,8 @@ static bool ignore_proc(pid_t pid, bool warn_rootfs) {
         if (uid != 0)
                 return false;
 
-        p = procfs_file_alloca(pid, "cmdline");
-        f = fopen(p, "re");
-        if (!f)
+        r = procfs_fopenat(proc_dir_fd, pid, "cmdline", "re", &f);
+        if (r < 0)
                 return true; /* not really, but has the desired effect */
 
         /* Try to read the first character of the command line. If the cmdline is empty (which might be the case for
@@ -63,11 +64,11 @@ static bool ignore_proc(pid_t pid, bool warn_rootfs) {
                 return false;
 
         if (warn_rootfs &&
-            pid_from_same_root_fs(pid) == 0) {
+            pid_from_same_root_fs_at(proc_dir_fd, pid) == 0) {
 
                 _cleanup_free_ char *comm = NULL;
 
-                (void) get_process_comm(pid, &comm);
+                (void) get_process_comm_at(proc_dir_fd, pid, &comm);
 
                 log_notice("Process " PID_FMT " (%s) has been marked to be excluded from killing. It is "
                            "running from the root file system, and thus likely to block re-mounting of the "
@@ -78,7 +79,7 @@ static bool ignore_proc(pid_t pid, bool warn_rootfs) {
         return true;
 }
 
-static void log_children_no_yet_killed(Set *pids) {
+static void log_children_no_yet_killed(int proc_dir_fd, Set *pids) {
         _cleanup_free_ char *lst_child = NULL;
         void *p;
         int r;
@@ -86,7 +87,7 @@ static void log_children_no_yet_killed(Set *pids) {
         SET_FOREACH(p, pids) {
                 _cleanup_free_ char *s = NULL;
 
-                if (get_process_comm(PTR_TO_PID(p), &s) >= 0)
+                if (get_process_comm_at(proc_dir_fd, PTR_TO_PID(p), &s) >= 0)
                         r = strextendf(&lst_child, ", " PID_FMT " (%s)", PTR_TO_PID(p), s);
                 else
                         r = strextendf(&lst_child, ", " PID_FMT, PTR_TO_PID(p));
@@ -100,7 +101,7 @@ static void log_children_no_yet_killed(Set *pids) {
         log_warning("Waiting for process: %s", lst_child + 2);
 }
 
-static int wait_for_children(Set *pids, sigset_t *mask, usec_t timeout) {
+static int wait_for_children(int proc_dir_fd, Set *pids, sigset_t *mask, usec_t timeout) {
         usec_t until, date_log_child, n;
 
         assert(mask);
@@ -162,7 +163,7 @@ static int wait_for_children(Set *pids, sigset_t *mask, usec_t timeout) {
 
                 n = now(CLOCK_MONOTONIC);
                 if (date_log_child > 0 && n >= date_log_child) {
-                        log_children_no_yet_killed(pids);
+                        log_children_no_yet_killed(proc_dir_fd, pids);
                         /* Log the children not yet killed only once */
                         date_log_child = 0;
                 }
@@ -187,18 +188,15 @@ static int wait_for_children(Set *pids, sigset_t *mask, usec_t timeout) {
         }
 }
 
-static int killall(int sig, Set *pids, bool send_sighup) {
-        _cleanup_closedir_ DIR *dir = NULL;
+static int killall(DIR *proc_dir, int sig, Set *pids, bool send_sighup) {
         int n_killed = 0;
+        int proc_dir_fd;
 
         /* Send the specified signal to all remaining processes, if not excluded by ignore_proc().
          * Returns the number of processes to which the specified signal was sent */
 
-        dir = opendir("/proc");
-        if (!dir)
-                return log_warning_errno(errno, "opendir(/proc) failed: %m");
-
-        FOREACH_DIRENT_ALL(de, dir, break) {
+        proc_dir_fd = dirfd(proc_dir);
+        FOREACH_DIRENT_ALL(de, proc_dir, break) {
                 pid_t pid;
                 int r;
 
@@ -208,13 +206,13 @@ static int killall(int sig, Set *pids, bool send_sighup) {
                 if (parse_pid(de->d_name, &pid) < 0)
                         continue;
 
-                if (ignore_proc(pid, sig == SIGKILL && !in_initrd()))
+                if (ignore_proc(proc_dir_fd, pid, sig == SIGKILL && !in_initrd()))
                         continue;
 
                 if (sig == SIGKILL) {
                         _cleanup_free_ char *s = NULL;
 
-                        (void) get_process_comm(pid, &s);
+                        (void) get_process_comm_at(proc_dir_fd, pid, &s);
                         log_notice("Sending SIGKILL to PID "PID_FMT" (%s).", pid, strna(s));
                 }
 
@@ -239,7 +237,7 @@ static int killall(int sig, Set *pids, bool send_sighup) {
                         make sure to only send this after SIGTERM so
                         that SIGTERM is always first in the queue. */
 
-                        if (get_ctty_devnr(pid, NULL) >= 0)
+                        if (get_ctty_devnr_at(proc_dir_fd, pid, NULL) >= 0)
                                 /* it's OK if the process is gone, just ignore the result */
                                 (void) kill(pid, SIGHUP);
                 }
@@ -252,12 +250,21 @@ int broadcast_signal(int sig, bool wait_for_exit, bool send_sighup, usec_t timeo
         int n_children_left;
         sigset_t mask, oldmask;
         _cleanup_set_free_ Set *pids = NULL;
+        _cleanup_closedir_ DIR *proc_dir = NULL;
 
         /* Send the specified signal to all remaining processes, if not excluded by ignore_proc().
          * Return:
          *  - The number of processes still "alive" after the timeout (that should have been killed)
          *    if the function needs to wait for the end of the processes (wait_for_exit).
          *  - Otherwise, the number of processes to which the specified signal was sent */
+
+        proc_dir = opendir("/proc");
+        if (proc_dir == NULL)
+                log_warning_errno(errno, "opendir(/proc) failed: %m");
+
+        /* If storage daemons are involved, /etc/initrd-release may not be accessed when killall
+         * runs. Call in_initrd now, with the assumption that it caches the result of the check. */
+        in_initrd();
 
         if (wait_for_exit)
                 pids = set_new(NULL);
@@ -269,13 +276,13 @@ int broadcast_signal(int sig, bool wait_for_exit, bool send_sighup, usec_t timeo
         if (kill(-1, SIGSTOP) < 0 && errno != ESRCH)
                 log_warning_errno(errno, "kill(-1, SIGSTOP) failed: %m");
 
-        n_children_left = killall(sig, pids, send_sighup);
+        n_children_left = killall(proc_dir, sig, pids, send_sighup);
 
         if (kill(-1, SIGCONT) < 0 && errno != ESRCH)
                 log_warning_errno(errno, "kill(-1, SIGCONT) failed: %m");
 
         if (wait_for_exit && n_children_left > 0)
-                n_children_left = wait_for_children(pids, &mask, timeout);
+                n_children_left = wait_for_children(dirfd(proc_dir), pids, &mask, timeout);
 
         assert_se(sigprocmask(SIG_SETMASK, &oldmask, NULL) == 0);
 

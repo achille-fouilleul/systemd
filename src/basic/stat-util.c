@@ -182,16 +182,16 @@ int path_is_read_only_fs(const char *path) {
         return false;
 }
 
-int files_same(const char *filea, const char *fileb, int flags) {
+int files_same_at(int dir_fd, const char *filea, const char *fileb, int flags) {
         struct stat a, b;
 
         assert(filea);
         assert(fileb);
 
-        if (fstatat(AT_FDCWD, filea, &a, flags) < 0)
+        if (fstatat(dir_fd, filea, &a, flags) < 0)
                 return -errno;
 
-        if (fstatat(AT_FDCWD, fileb, &b, flags) < 0)
+        if (fstatat(dir_fd, fileb, &b, flags) < 0)
                 return -errno;
 
         return stat_inode_same(&a, &b);

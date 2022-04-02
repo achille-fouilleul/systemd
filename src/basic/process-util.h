@@ -2,6 +2,7 @@
 #pragma once
 
 #include <errno.h>
+#include <fcntl.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -31,6 +32,21 @@
                 (const char*) _r_;                                      \
         })
 
+#define procfs_file_alloca_rel(pid, field)                              \
+        ({                                                              \
+                pid_t _pid_ = (pid);                                    \
+                const char *_field_ = (field);                          \
+                char *_r_;                                              \
+                if (_pid_ == 0) {                                       \
+                        _r_ = newa(char, STRLEN("self/") + strlen(_field_) + 1); \
+                        strcpy(stpcpy(_r_, "self/"), _field_);          \
+                } else {                                                \
+                        _r_ = newa(char, DECIMAL_STR_MAX(pid_t) + 1 + strlen(_field_) + 1); \
+                        sprintf(_r_, PID_FMT "/%s", _pid_, _field_);    \
+                }                                                       \
+                (const char*) _r_;                                      \
+        })
+
 typedef enum ProcessCmdlineFlags {
         PROCESS_CMDLINE_COMM_FALLBACK = 1 << 0,
         PROCESS_CMDLINE_USE_LOCALE    = 1 << 1,
@@ -38,10 +54,24 @@ typedef enum ProcessCmdlineFlags {
         PROCESS_CMDLINE_QUOTE_POSIX   = 1 << 3,
 } ProcessCmdlineFlags;
 
-int get_process_comm(pid_t pid, char **ret);
+int procfs_fopenat(int proc_dirfd, pid_t pid, const char *field, const char *mode, FILE **f);
+int procfs_read_one_line_file(int proc_dir_fd, pid_t pid, const char *field, char **line);
+
+int get_process_comm_at(int proc_dirfd, pid_t pid, char **ret);
+
+static inline int get_process_comm(pid_t pid, char **ret) {
+        return get_process_comm_at(AT_FDCWD, pid, ret);
+}
+
 int get_process_cmdline(pid_t pid, size_t max_columns, ProcessCmdlineFlags flags, char **ret);
 int get_process_exe(pid_t pid, char **ret);
-int get_process_uid(pid_t pid, uid_t *ret);
+
+int get_process_uid_at(int proc_dirfd, pid_t pid, uid_t *ret);
+
+static inline int get_process_uid(pid_t pid, uid_t *ret) {
+        return get_process_uid_at(AT_FDCWD, pid, ret);
+}
+
 int get_process_gid(pid_t pid, gid_t *ret);
 int get_process_capeff(pid_t pid, char **ret);
 int get_process_cwd(pid_t pid, char **ret);
@@ -70,14 +100,24 @@ void sigterm_wait(pid_t pid);
 int kill_and_sigcont(pid_t pid, int sig);
 
 int rename_process(const char name[]);
-int is_kernel_thread(pid_t pid);
+
+int is_kernel_thread_at(int proc_dir_fd, pid_t pid);
+
+static inline int is_kernel_thread(pid_t pid) {
+        return is_kernel_thread_at(AT_FDCWD, pid);
+}
 
 int getenv_for_pid(pid_t pid, const char *field, char **_value);
 
 bool pid_is_alive(pid_t pid);
 bool pid_is_unwaited(pid_t pid);
 int pid_is_my_child(pid_t pid);
-int pid_from_same_root_fs(pid_t pid);
+
+int pid_from_same_root_fs_at(int proc_dirfd, pid_t pid);
+
+static inline int pid_from_same_root_fs(pid_t pid) {
+        return pid_from_same_root_fs_at(AT_FDCWD, pid);
+}
 
 bool is_main_thread(void);
 

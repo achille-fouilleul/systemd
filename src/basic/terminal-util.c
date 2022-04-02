@@ -950,7 +950,7 @@ int getttyname_harder(int fd, char **ret) {
         return 0;
 }
 
-int get_ctty_devnr(pid_t pid, dev_t *d) {
+int get_ctty_devnr_at(int proc_dir_fd, pid_t pid, dev_t *d) {
         int r;
         _cleanup_free_ char *line = NULL;
         const char *p;
@@ -958,8 +958,7 @@ int get_ctty_devnr(pid_t pid, dev_t *d) {
 
         assert(pid >= 0);
 
-        p = procfs_file_alloca(pid, "stat");
-        r = read_one_line_file(p, &line);
+        r = procfs_read_one_line_file(proc_dir_fd, pid, "stat", &line);
         if (r < 0)
                 return r;
 

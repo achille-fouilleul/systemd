@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 #pragma once
 
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -239,7 +240,12 @@ DEFINE_ANSI_FUNC_UNDERLINE(highlight_blue_underline,        HIGHLIGHT_BLUE);
 DEFINE_ANSI_FUNC_UNDERLINE(highlight_magenta_underline,     HIGHLIGHT_MAGENTA);
 DEFINE_ANSI_FUNC_UNDERLINE_256(highlight_grey_underline,    HIGHLIGHT_GREY, HIGHLIGHT_GREY_FALLBACK);
 
-int get_ctty_devnr(pid_t pid, dev_t *d);
+int get_ctty_devnr_at(int proc_dir_fd, pid_t pid, dev_t *d);
+
+static inline int get_ctty_devnr(pid_t pid, dev_t *d) {
+        return get_ctty_devnr_at(AT_FDCWD, pid, d);
+}
+
 int get_ctty(pid_t, dev_t *_devnr, char **r);
 
 int getttyname_malloc(int fd, char **r);

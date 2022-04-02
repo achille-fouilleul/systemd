@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdio_ext.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
@@ -53,6 +54,25 @@
  */
 #define COMM_MAX_LEN 128
 
+int procfs_fopenat(int proc_dirfd, pid_t pid, const char *field, const char *mode, FILE **f) {
+        const char *p;
+
+        p = proc_dirfd != AT_FDCWD ? procfs_file_alloca_rel(pid, field)
+                : procfs_file_alloca(pid, field);
+        return xfopenat(proc_dirfd, p, mode, 0, f);
+}
+
+int procfs_read_one_line_file(int proc_dir_fd, pid_t pid, const char *field, char **line) {
+        _cleanup_fclose_ FILE *f = NULL;
+        int r;
+
+        r = procfs_fopenat(proc_dir_fd, pid, field, "re", &f);
+        if (r < 0)
+                return r;
+
+        return read_line(f, LONG_LINE_MAX, line);
+}
+
 static int get_process_state(pid_t pid) {
         _cleanup_free_ char *line = NULL;
         const char *p;
@@ -85,7 +105,7 @@ static int get_process_state(pid_t pid) {
         return (unsigned char) state;
 }
 
-int get_process_comm(pid_t pid, char **ret) {
+int get_process_comm_at(int proc_dirfd, pid_t pid, char **ret) {
         _cleanup_free_ char *escaped = NULL, *comm = NULL;
         int r;
 
@@ -100,12 +120,8 @@ int get_process_comm(pid_t pid, char **ret) {
                 if (prctl(PR_GET_NAME, comm) < 0)
                         return -errno;
         } else {
-                const char *p;
-
-                p = procfs_file_alloca(pid, "comm");
-
                 /* Note that process names of kernel threads can be much longer than TASK_COMM_LEN */
-                r = read_one_line_file(p, &comm);
+                r = procfs_read_one_line_file(proc_dirfd, pid, "comm", &comm);
                 if (r == -ENOENT)
                         return -ESRCH;
                 if (r < 0)
@@ -398,11 +414,10 @@ int rename_process(const char name[]) {
         return !truncated;
 }
 
-int is_kernel_thread(pid_t pid) {
+int is_kernel_thread_at(int proc_dir_fd, pid_t pid) {
         _cleanup_free_ char *line = NULL;
         unsigned long long flags;
         size_t l, i;
-        const char *p;
         char *q;
         int r;
 
@@ -411,8 +426,7 @@ int is_kernel_thread(pid_t pid) {
         if (!pid_is_valid(pid))
                 return -EINVAL;
 
-        p = procfs_file_alloca(pid, "stat");
-        r = read_one_line_file(p, &line);
+        r = procfs_read_one_line_file(proc_dir_fd, pid, "stat", &line);
         if (r == -ENOENT)
                 return -ESRCH;
         if (r < 0)
@@ -503,7 +517,7 @@ int get_process_exe(pid_t pid, char **ret) {
         return 0;
 }
 
-static int get_process_id(pid_t pid, const char *field, uid_t *ret) {
+static int get_process_id(int proc_dirfd, pid_t pid, const char *field, uid_t *ret) {
         _cleanup_fclose_ FILE *f = NULL;
         const char *p;
         int r;
@@ -546,14 +560,14 @@ static int get_process_id(pid_t pid, const char *field, uid_t *ret) {
         return -EIO;
 }
 
-int get_process_uid(pid_t pid, uid_t *ret) {
+int get_process_uid_at(int proc_dirfd, pid_t pid, uid_t *ret) {
 
         if (pid == 0 || pid == getpid_cached()) {
                 *ret = getuid();
                 return 0;
         }
 
-        return get_process_id(pid, "Uid:", ret);
+        return get_process_id(proc_dirfd, pid, "Uid:", ret);
 }
 
 int get_process_gid(pid_t pid, gid_t *ret) {
@@ -564,7 +578,7 @@ int get_process_gid(pid_t pid, gid_t *ret) {
         }
 
         assert_cc(sizeof(uid_t) == sizeof(gid_t));
-        return get_process_id(pid, "Gid:", ret);
+        return get_process_id(AT_FDCWD, pid, "Gid:", ret);
 }
 
 int get_process_cwd(pid_t pid, char **ret) {
@@ -998,8 +1012,9 @@ bool pid_is_alive(pid_t pid) {
         return true;
 }
 
-int pid_from_same_root_fs(pid_t pid) {
-        const char *root;
+int pid_from_same_root_fs_at(int proc_dirfd, pid_t pid) {
+        const char *root1;
+        const char *root2;
 
         if (pid < 0)
                 return false;
@@ -1007,9 +1022,15 @@ int pid_from_same_root_fs(pid_t pid) {
         if (pid == 0 || pid == getpid_cached())
                 return true;
 
-        root = procfs_file_alloca(pid, "root");
+        if (proc_dirfd != AT_FDCWD) {
+                root1 = procfs_file_alloca_rel(pid, "root");
+                root2 = "1/root";
+        } else {
+                root1 = procfs_file_alloca(pid, "root");
+                root2 = "/proc/1/root";
+        }
 
-        return files_same(root, "/proc/1/root", 0);
+        return files_same_at(proc_dirfd, root1, root2, 0);
 }
 
 bool is_main_thread(void) {
